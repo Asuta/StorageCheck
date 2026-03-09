@@ -312,6 +312,7 @@ select {
     grid-template-columns: minmax(0, 1.55fr) minmax(340px, 0.9fr);
     gap: 20px;
     min-height: 0;
+    align-items: start;
 }
 
 .explorer,
@@ -323,6 +324,9 @@ select {
 .detail-stack {
     display: grid;
     gap: 20px;
+    align-self: start;
+    align-content: start;
+    grid-auto-rows: max-content;
 }
 
 .explorer-header {
