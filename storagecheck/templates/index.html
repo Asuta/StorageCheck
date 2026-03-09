@@ -1,0 +1,172 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_title }}</title>
+    <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
+    <script defer src="/static/app.js?v={{ asset_version }}"></script>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar panel">
+            <div class="brand-block">
+                <p class="eyebrow">StorageCheck</p>
+                <h1>硬盘扫描 + 历史追踪</h1>
+                <p class="brand-copy">定时记录 C 盘或任意目录的大小快照，按层查看占用、趋势和变化。</p>
+            </div>
+            <div class="sidebar-actions">
+                <button id="add-target-button" class="primary-button">添加扫描目标</button>
+            </div>
+            <div id="target-list" class="target-list"></div>
+            <div class="sidebar-note">
+                <h2>说明</h2>
+                <p>深度模式默认只保存前 6 层节点，但每个已保存目录的大小仍会把更深层内容累加进去。</p>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <section class="hero panel">
+                <div>
+                    <p class="eyebrow">Snapshot Explorer</p>
+                    <h2 id="hero-title">先添加一个扫描目标</h2>
+                    <p id="hero-subtitle" class="hero-subtitle">支持手动扫描、每小时扫描、每天定时扫描。</p>
+                </div>
+                <div class="hero-actions">
+                    <button id="scan-now-button" class="primary-button" disabled>立即扫描</button>
+                    <button id="edit-target-button" class="ghost-button" disabled>编辑目标</button>
+                    <button id="refresh-button" class="ghost-button">刷新</button>
+                </div>
+            </section>
+
+            <section class="metrics-grid" id="metrics-grid">
+                <article class="metric-card panel">
+                    <p class="metric-label">最近总容量</p>
+                    <p class="metric-value">--</p>
+                    <p class="metric-caption">添加目标后开始记录</p>
+                </article>
+                <article class="metric-card panel">
+                    <p class="metric-label">最近扫描</p>
+                    <p class="metric-value">--</p>
+                    <p class="metric-caption">支持手动与定时</p>
+                </article>
+                <article class="metric-card panel">
+                    <p class="metric-label">扫描模式</p>
+                    <p class="metric-value">--</p>
+                    <p class="metric-caption">深度模式 / 全量模式</p>
+                </article>
+                <article class="metric-card panel">
+                    <p class="metric-label">历史记录</p>
+                    <p class="metric-value">0 次</p>
+                    <p class="metric-caption">用于观察体积变化</p>
+                </article>
+            </section>
+
+            <section class="workspace-grid">
+                <section class="explorer panel">
+                    <div id="explorer-header" class="explorer-header"></div>
+                    <div id="table-container" class="table-container empty-state">
+                        还没有数据。先添加目标，再点击“立即扫描”。
+                    </div>
+                </section>
+
+                <aside class="detail-stack">
+                    <section class="panel detail-panel">
+                        <div class="section-header">
+                            <div>
+                                <p class="eyebrow">History</p>
+                                <h3>路径趋势</h3>
+                            </div>
+                        </div>
+                        <div id="history-container" class="history-container empty-state">
+                            扫描后这里会显示当前路径的历史曲线。
+                        </div>
+                    </section>
+
+                    <section class="panel detail-panel">
+                        <div class="section-header">
+                            <div>
+                                <p class="eyebrow">Runs</p>
+                                <h3>最近扫描记录</h3>
+                            </div>
+                        </div>
+                        <div id="scan-list" class="scan-list empty-state">
+                            暂无扫描记录。
+                        </div>
+                    </section>
+                </aside>
+            </section>
+        </main>
+    </div>
+
+    <dialog id="target-dialog" class="target-dialog">
+        <form id="target-form" method="dialog">
+            <div class="dialog-header">
+                <div>
+                    <p class="eyebrow">Target</p>
+                    <h3 id="dialog-title">添加扫描目标</h3>
+                </div>
+                <button type="button" id="close-dialog-button" class="icon-button">×</button>
+            </div>
+
+            <label>
+                名称
+                <input id="target-label" name="label" type="text" maxlength="120" placeholder="例如 系统盘 C:" />
+            </label>
+
+            <label>
+                扫描路径
+                <input id="target-root-path" name="root_path" type="text" required placeholder="例如 C:\ 或 D:\Project" />
+            </label>
+
+            <div class="form-grid">
+                <label>
+                    扫描模式
+                    <select id="target-scan-mode" name="scan_mode">
+                        <option value="depth">按层保存</option>
+                        <option value="full">完整保存</option>
+                    </select>
+                </label>
+
+                <label>
+                    最大层级
+                    <input id="target-max-depth" name="max_depth" type="number" min="1" max="20" value="6" />
+                </label>
+            </div>
+
+            <div class="form-grid">
+                <label>
+                    计划方式
+                    <select id="target-schedule-type" name="schedule_type">
+                        <option value="manual">仅手动</option>
+                        <option value="hourly">每隔几小时</option>
+                        <option value="daily">每天定时</option>
+                    </select>
+                </label>
+
+                <label id="interval-wrapper">
+                    间隔小时
+                    <input id="target-interval-hours" name="interval_hours" type="number" min="1" max="168" value="1" />
+                </label>
+
+                <label id="time-wrapper">
+                    每天时间
+                    <input id="target-daily-time" name="daily_time" type="time" value="09:00" />
+                </label>
+            </div>
+
+            <label class="checkbox-row">
+                <input id="target-enabled" name="enabled" type="checkbox" checked />
+                启用这个目标的自动调度
+            </label>
+
+            <div class="dialog-actions">
+                <button type="button" id="cancel-dialog-button" class="ghost-button">取消</button>
+                <button type="submit" class="primary-button">保存</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div id="toast-container" class="toast-container"></div>
+</body>
+</html>
