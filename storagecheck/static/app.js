@@ -29,6 +29,7 @@ const refs = {
     labelInput: document.getElementById("target-label"),
     rootPathInput: document.getElementById("target-root-path"),
     scanModeInput: document.getElementById("target-scan-mode"),
+    sizeStrategyInput: document.getElementById("target-size-strategy"),
     maxDepthInput: document.getElementById("target-max-depth"),
     scheduleTypeInput: document.getElementById("target-schedule-type"),
     intervalHoursInput: document.getElementById("target-interval-hours"),
@@ -174,6 +175,10 @@ function scanModeLabel(scan) {
     return scan.mode === "full" ? "完整保存" : `按层 ${scan.max_depth} 层`;
 }
 
+function sizeStrategyLabel(strategy) {
+    return strategy === "logical" ? "极速 / 逻辑大小" : "精确 / 实际占用";
+}
+
 function engineLabel(engine) {
     return engine === "ntfs_mft" ? "NTFS MFT" : "\u9012\u5f52\u626b\u63cf";
 }
@@ -227,7 +232,7 @@ function renderTargets() {
                     ? '<span class="small-tag danger">上次失败</span>'
                     : '<span class="small-tag success">可用</span>';
             const progressMeta = activeScan
-                ? `<p class="small-meta">\u5df2\u626b ${formatCount(activeScan.processed_entry_count)} \u9879 | ${formatBytes(activeScan.scanned_size_bytes)} | ${escapeHtml(engineLabel(activeScan.engine))}</p>`
+                ? `<p class="small-meta">\u5df2\u626b ${formatCount(activeScan.processed_entry_count)} \u9879 | ${formatBytes(activeScan.scanned_size_bytes)} | ${escapeHtml(engineLabel(activeScan.engine))} | ${escapeHtml(sizeStrategyLabel(activeScan.size_strategy))}</p>`
                 : "";
             return `
                 <article class="target-card ${target.id === state.selectedTargetId ? "selected" : ""}" data-target-id="${target.id}">
@@ -241,6 +246,7 @@ function renderTargets() {
                     <div class="legend">
                         <span class="small-tag">${escapeHtml(scheduleLabel(target))}</span>
                         <span class="small-tag warn">${escapeHtml(modeLabel(target))}</span>
+                        <span class="small-tag">${escapeHtml(sizeStrategyLabel(target.size_strategy))}</span>
                     </div>
                     <div>
                         <p class="small-meta">最近容量</p>
@@ -273,10 +279,10 @@ function renderHero() {
     refs.heroTitle.textContent = target.label;
     if (activeScan) {
         const phaseLabel = activeScan.phase_label ? ` | ${activeScan.phase_label}` : "";
-        refs.heroSubtitle.textContent = `${target.root_path} | ${engineLabel(activeScan.engine)}${phaseLabel} | \u5df2\u626b ${formatCount(activeScan.processed_entry_count)} \u9879 / ${formatBytes(activeScan.scanned_size_bytes)}`;
+        refs.heroSubtitle.textContent = `${target.root_path} | ${engineLabel(activeScan.engine)} | ${sizeStrategyLabel(activeScan.size_strategy)}${phaseLabel} | \u5df2\u626b ${formatCount(activeScan.processed_entry_count)} \u9879 / ${formatBytes(activeScan.scanned_size_bytes)}`;
     } else {
         const nextRun = target.next_run_at ? `，下次计划 ${formatDate(target.next_run_at)}` : "";
-        refs.heroSubtitle.textContent = `${target.root_path} · ${scheduleLabel(target)}${nextRun}`;
+        refs.heroSubtitle.textContent = `${target.root_path} · ${scheduleLabel(target)} · ${sizeStrategyLabel(target.size_strategy)}${nextRun}`;
     }
     renderMetrics();
 }
@@ -300,9 +306,9 @@ function renderMetrics() {
             label: activeScan ? "\u626b\u63cf\u5f15\u64ce" : "\u626b\u63cf\u6a21\u5f0f",
             value: activeScan ? engineLabel(activeScan.engine) : target ? modeLabel(target) : "--",
             caption: activeScan
-                ? `${activeScan.phase_label || "\u5b9e\u65f6\u626b\u63cf"} | \u5df2\u5199\u5165 ${formatCount(activeScan.stored_node_count)} \u4e2a\u8282\u70b9`
+                ? `${sizeStrategyLabel(activeScan.size_strategy)} | ${activeScan.phase_label || "\u5b9e\u65f6\u626b\u63cf"} | \u5df2\u5199\u5165 ${formatCount(activeScan.stored_node_count)} \u4e2a\u8282\u70b9`
                 : scan
-                    ? `\u5f53\u524d\u67e5\u770b\u7684\u662f\u7b2c ${scan.id} \u6b21\u5feb\u7167 | ${engineLabel(scan.engine)}`
+                    ? `\u5f53\u524d\u67e5\u770b\u7684\u662f\u7b2c ${scan.id} \u6b21\u5feb\u7167 | ${engineLabel(scan.engine)} | ${sizeStrategyLabel(scan.size_strategy)}`
                     : "\u6df1\u5ea6\u6a21\u5f0f / \u5168\u91cf\u6a21\u5f0f",
         },
         {
@@ -541,17 +547,28 @@ function renderProgressBlock(progress) {
     const percent = hasRatio ? Math.max(1, Math.min(100, ratio * 100)) : null;
     const phaseLabel = progress.phase_label || "\u5b9e\u65f6\u626b\u63cf";
     const engineText = engineLabel(progress.engine);
+    const sizeStrategyText = sizeStrategyLabel(progress.size_strategy);
+    const processedRecordCount = Number(progress.processed_record_count || 0);
+    const hasRecordEstimate = Number.isFinite(Number(progress.estimated_total_records)) && Number(progress.estimated_total_records) > 0;
     const progressHint = hasRatio
         ? `${phaseLabel} | ${percent.toFixed(percent >= 10 ? 0 : 1)}%`
-        : "\u8fd9\u91cc\u663e\u793a\u7684\u662f\u5b9e\u65f6\u8fdb\u5ea6\u6761\uff0c\u4e0d\u662f\u7cbe\u786e\u767e\u5206\u6bd4\uff1b\u7cbe\u786e\u767e\u5206\u6bd4\u9700\u8981\u5148\u9884\u626b\u4e00\u904d\u6574\u76d8\u3002";
+        : processedRecordCount > 0
+            ? `${phaseLabel} | \u5df2\u5904\u7406 ${formatCount(processedRecordCount)} \u6761 MFT \u8bb0\u5f55`
+            : `${phaseLabel} | \u6b63\u5728\u6301\u7eed\u8bfb\u53d6 MFT \u8bb0\u5f55`;
     const progressBar = hasRatio
         ? `<div class="scan-progress-bar determinate" style="width: ${percent}%;"></div>`
         : '<div class="scan-progress-bar indeterminate"></div>';
-    const recordStat = progress.estimated_total_records
+    const recordStat = hasRecordEstimate
         ? `
                 <div class="progress-stat">
                     <span>MFT \u8bb0\u5f55</span>
                     <strong>${formatCount(progress.processed_record_count)} / ${formatCount(progress.estimated_total_records)}</strong>
+                </div>`
+        : processedRecordCount > 0
+            ? `
+                <div class="progress-stat">
+                    <span>MFT \u8bb0\u5f55</span>
+                    <strong>${formatCount(processedRecordCount)} \u5df2\u5904\u7406</strong>
                 </div>`
         : "";
     const engineNote = progress.engine_note
@@ -567,6 +584,7 @@ function renderProgressBlock(progress) {
                 </div>
                 <div class="legend">
                     <span class="small-tag warn">${escapeHtml(engineText)}</span>
+                    <span class="small-tag">${escapeHtml(sizeStrategyText)}</span>
                     <span class="small-tag running">\u5df2\u8fd0\u884c ${formatDuration(progress.started_at)}</span>
                 </div>
             </div>
@@ -633,8 +651,8 @@ function renderScanList() {
                         ? "warn"
                         : "running";
             const sizeLabel = isRunning && progress
-                ? `${formatBytes(progress.scanned_size_bytes)} | ${scanModeLabel(scan)} | ${engineLabel(progress.engine || scan.engine)}`
-                : `${formatBytes(scan.total_size_bytes || 0)} | ${scanModeLabel(scan)} | ${engineLabel(scan.engine)}`;
+                ? `${formatBytes(progress.scanned_size_bytes)} | ${scanModeLabel(scan)} | ${engineLabel(progress.engine || scan.engine)} | ${sizeStrategyLabel(progress.size_strategy || scan.size_strategy)}`
+                : `${formatBytes(scan.total_size_bytes || 0)} | ${scanModeLabel(scan)} | ${engineLabel(scan.engine)} | ${sizeStrategyLabel(scan.size_strategy)}`;
             return `
                 <article class="scan-item ${scan.id === state.selectedScanId ? "active" : ""}">
                     <div class="legend">
@@ -839,6 +857,7 @@ function openDialog(mode) {
         refs.labelInput.value = target.label || "";
         refs.rootPathInput.value = target.root_path || "";
         refs.scanModeInput.value = target.scan_mode || "depth";
+        refs.sizeStrategyInput.value = target.size_strategy || "allocated";
         refs.maxDepthInput.value = target.max_depth || 6;
         refs.scheduleTypeInput.value = target.schedule_type || "manual";
         refs.intervalHoursInput.value = target.interval_hours || 1;
@@ -847,6 +866,7 @@ function openDialog(mode) {
     } else {
         refs.form.reset();
         refs.scanModeInput.value = "depth";
+        refs.sizeStrategyInput.value = "logical";
         refs.maxDepthInput.value = 6;
         refs.scheduleTypeInput.value = "manual";
         refs.intervalHoursInput.value = 1;
@@ -866,6 +886,7 @@ function formPayload() {
         label: refs.labelInput.value.trim() || null,
         root_path: refs.rootPathInput.value.trim(),
         scan_mode: refs.scanModeInput.value,
+        size_strategy: refs.sizeStrategyInput.value,
         max_depth: Number(refs.maxDepthInput.value || 6),
         schedule_type: refs.scheduleTypeInput.value,
         interval_hours: refs.scheduleTypeInput.value === "hourly" ? Number(refs.intervalHoursInput.value || 1) : null,

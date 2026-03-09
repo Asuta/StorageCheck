@@ -66,7 +66,8 @@ class _FileLink:
     name: str
     namespace: int
     file_attributes: int
-    size_bytes: int
+    allocated_size_bytes: int
+    logical_size_bytes: int
     modified_time: str | None
 
 
@@ -228,8 +229,14 @@ if kernel32 is not None:
     kernel32.BackupRead.restype = ctypes.c_int
 
 
-def select_scan_engine(root_path: str, *, mode: str, max_depth: int) -> ScanEngineSelection:
-    scanner = DiskScanner(mode=mode, max_depth=max_depth)
+def select_scan_engine(
+    root_path: str,
+    *,
+    mode: str,
+    max_depth: int,
+    size_strategy: str = "allocated",
+) -> ScanEngineSelection:
+    scanner = DiskScanner(mode=mode, max_depth=max_depth, size_strategy=size_strategy)
     normalized_root = normalize_path(root_path)
     if os.name != "nt":
         return ScanEngineSelection(scanner=scanner, engine="recursive", note="当前系统不是 Windows，已回退到递归扫描。")
@@ -266,7 +273,7 @@ def select_scan_engine(root_path: str, *, mode: str, max_depth: int) -> ScanEngi
             note=f"无法直接读取 {normalized_root} 的 $MFT：{access_error}。已回退到递归扫描。",
         )
     return ScanEngineSelection(
-        scanner=NtfsMftScanner(mode=mode, max_depth=max_depth),
+        scanner=NtfsMftScanner(mode=mode, max_depth=max_depth, size_strategy=size_strategy),
         engine="ntfs_mft",
         note=None,
     )
@@ -338,7 +345,6 @@ class NtfsMftScanner(DiskScanner):
                 parent_id=None,
             )
         }
-        total_records = self._estimate_total_records(normalized_root)
         self._check_cancel(should_cancel)
         self._emit_mft_progress(
             on_progress,
@@ -347,11 +353,13 @@ class NtfsMftScanner(DiskScanner):
             phase="mft-pass-1",
             phase_label="读取 MFT",
             processed_record_count=0,
-            estimated_total_records=total_records,
-            progress_ratio=0.0,
+            estimated_total_records=None,
+            progress_ratio=None,
             force=True,
         )
+        first_pass_record_count = 0
         for processed_record_count, parsed_record in enumerate(self._iter_parsed_records(normalized_root, should_cancel=should_cancel), start=1):
+            first_pass_record_count = processed_record_count
             self._consume_record(parsed_record, directory_map)
             self._emit_mft_progress_for_record(
                 on_progress,
@@ -359,8 +367,8 @@ class NtfsMftScanner(DiskScanner):
                 phase="mft-pass-1",
                 phase_label="读取 MFT",
                 processed_record_count=processed_record_count,
-                estimated_total_records=total_records,
-                progress_ratio=self._ratio_for_phase(processed_record_count, total_records, 0.0),
+                estimated_total_records=None,
+                progress_ratio=None,
             )
 
         reachable_order = self._mark_reachable_directories(directory_map, normalized_root)
@@ -373,14 +381,16 @@ class NtfsMftScanner(DiskScanner):
             current_path=normalized_root,
             current_kind="dir",
             phase="mft-pass-2",
-            phase_label="校准本地占用",
+            phase_label="校准大小并写入文件节点",
             processed_record_count=0,
-            estimated_total_records=total_records,
-            progress_ratio=0.34,
+            estimated_total_records=None,
+            progress_ratio=None,
             force=True,
         )
+        second_pass_record_count = 0
         for processed_record_count, parsed_record in enumerate(self._iter_parsed_records(normalized_root, should_cancel=should_cancel), start=1):
-            self._accumulate_file_sizes(parsed_record, directory_map)
+            second_pass_record_count = processed_record_count
+            self._process_file_record(parsed_record, directory_map, on_node)
             current_path = self._best_progress_path(parsed_record, directory_map)
             current_kind = "dir" if parsed_record.is_directory else "file"
             self._emit_mft_progress(
@@ -388,10 +398,10 @@ class NtfsMftScanner(DiskScanner):
                 current_path=current_path,
                 current_kind=current_kind,
                 phase="mft-pass-2",
-                phase_label="校准本地占用",
+                phase_label="校准大小并写入文件节点",
                 processed_record_count=processed_record_count,
-                estimated_total_records=total_records,
-                progress_ratio=self._ratio_for_phase(processed_record_count, total_records, 0.34),
+                estimated_total_records=None,
+                progress_ratio=None,
             )
         self._compute_directory_totals(directory_map, reachable_order)
         root_dir = directory_map[NTFS_ROOT_RECORD]
@@ -400,32 +410,6 @@ class NtfsMftScanner(DiskScanner):
         self.processed_file_count = max(0, root_dir.descendant_count + 1 - self.processed_dir_count)
         self.processed_entry_count = root_dir.descendant_count + 1
         self._emit_directory_nodes(directory_map, reachable_order, on_node)
-        self._emit_mft_progress(
-            on_progress,
-            current_path=normalized_root,
-            current_kind="dir",
-            phase="mft-pass-3",
-            phase_label="写入文件节点",
-            processed_record_count=0,
-            estimated_total_records=total_records,
-            progress_ratio=0.67,
-            force=True,
-        )
-
-        for processed_record_count, parsed_record in enumerate(self._iter_parsed_records(normalized_root, should_cancel=should_cancel), start=1):
-            self._emit_file_nodes(parsed_record, directory_map, on_node)
-            current_path = self._best_progress_path(parsed_record, directory_map)
-            current_kind = "dir" if parsed_record.is_directory else "file"
-            self._emit_mft_progress(
-                on_progress,
-                current_path=current_path,
-                current_kind=current_kind,
-                phase="mft-pass-3",
-                phase_label="写入文件节点",
-                processed_record_count=processed_record_count,
-                estimated_total_records=total_records,
-                progress_ratio=self._ratio_for_phase(processed_record_count, total_records, 0.67),
-            )
 
         self._emit_mft_progress(
             on_progress,
@@ -433,8 +417,8 @@ class NtfsMftScanner(DiskScanner):
             current_kind="dir",
             phase="done",
             phase_label="扫描完成",
-            processed_record_count=total_records,
-            estimated_total_records=total_records,
+            processed_record_count=max(first_pass_record_count, second_pass_record_count),
+            estimated_total_records=None,
             progress_ratio=1.0,
             force=True,
         )
@@ -459,12 +443,6 @@ class NtfsMftScanner(DiskScanner):
         self.errors = []
         self._last_progress_emit = 0.0
         self._last_progress_entries = -1
-
-    def _estimate_total_records(self, root_path: str) -> int:
-        with _open_mft_stream(root_path) as (_, size_bytes):
-            if size_bytes <= 0:
-                return 1
-            return max(1, (size_bytes + MFT_RECORD_SIZE - 1) // MFT_RECORD_SIZE)
 
     def _iter_parsed_records(
         self,
@@ -564,10 +542,11 @@ class NtfsMftScanner(DiskScanner):
             directory_info.total_size_bytes = 0
             directory_info.descendant_count = 0
 
-    def _accumulate_file_sizes(
+    def _process_file_record(
         self,
         parsed_record: _ParsedRecord,
         directory_map: dict[int, _DirectoryInfo],
+        on_node,
     ) -> None:
         if parsed_record.is_directory:
             return
@@ -579,6 +558,25 @@ class NtfsMftScanner(DiskScanner):
             resolved_size = self._resolved_link_size(path, selected_link)
             parent_directory.direct_size_bytes += resolved_size
             self.scanned_size_bytes += resolved_size
+            depth = int(parent_directory.depth or 0) + 1
+            if not self._should_store(depth):
+                continue
+            self._emit_node(
+                {
+                    "path": path,
+                    "parent_path": parent_directory.path,
+                    "name": selected_link.name,
+                    "depth": depth,
+                    "kind": "file",
+                    "size_bytes": resolved_size,
+                    "child_count": 0,
+                    "descendant_count": 0,
+                    "modified_time": selected_link.modified_time,
+                    "has_children": False,
+                    "is_truncated": False,
+                },
+                on_node,
+            )
 
     def _compute_directory_totals(
         self,
@@ -632,43 +630,11 @@ class NtfsMftScanner(DiskScanner):
                 on_node,
             )
 
-    def _emit_file_nodes(
-        self,
-        parsed_record: _ParsedRecord,
-        directory_map: dict[int, _DirectoryInfo],
-        on_node,
-    ) -> None:
-        if parsed_record.is_directory:
-            return
-        for selected_link in _select_file_links(parsed_record.links):
-            parent_directory = directory_map.get(selected_link.parent_ref)
-            if parent_directory is None or not parent_directory.reachable or parent_directory.path is None:
-                continue
-            depth = int(parent_directory.depth or 0) + 1
-            if not self._should_store(depth):
-                continue
-            path = _join_child_path(parent_directory.path, selected_link.name)
-            resolved_size = self._resolved_link_size(path, selected_link)
-            self._emit_node(
-                {
-                    "path": path,
-                    "parent_path": parent_directory.path,
-                    "name": selected_link.name,
-                    "depth": depth,
-                    "kind": "file",
-                    "size_bytes": resolved_size,
-                    "child_count": 0,
-                    "descendant_count": 0,
-                    "modified_time": selected_link.modified_time,
-                    "has_children": False,
-                    "is_truncated": False,
-                },
-                on_node,
-            )
-
     def _resolved_link_size(self, path: str, selected_link: _FileLink) -> int:
+        if self.size_strategy == "logical":
+            return selected_link.logical_size_bytes
         if not _needs_actual_size_lookup(selected_link.file_attributes):
-            return selected_link.size_bytes
+            return selected_link.allocated_size_bytes
         try:
             stat_result = os.stat(path, follow_symlinks=False)
         except OSError:
@@ -683,8 +649,8 @@ class NtfsMftScanner(DiskScanner):
         phase: str,
         phase_label: str,
         processed_record_count: int,
-        estimated_total_records: int,
-        progress_ratio: float,
+        estimated_total_records: int | None,
+        progress_ratio: float | None,
     ) -> None:
         current_path = self._best_progress_path(parsed_record)
         current_kind = "dir" if parsed_record.is_directory else "file"
@@ -710,8 +676,8 @@ class NtfsMftScanner(DiskScanner):
         phase: str,
         phase_label: str,
         processed_record_count: int,
-        estimated_total_records: int,
-        progress_ratio: float,
+        estimated_total_records: int | None,
+        progress_ratio: float | None,
         force: bool = False,
     ) -> None:
         if on_progress is None:
@@ -760,14 +726,6 @@ class NtfsMftScanner(DiskScanner):
         if parent_directory is None or parent_directory.path is None:
             return best_link.name or f"MFT 记录 #{parsed_record.record_id}"
         return _join_child_path(parent_directory.path, best_link.name)
-
-    @staticmethod
-    def _ratio_for_phase(processed_record_count: int, total_records: int, phase_offset: float) -> float:
-        if total_records <= 0:
-            return min(1.0, max(0.0, phase_offset))
-        phase_progress = min(1.0, processed_record_count / total_records)
-        return min(1.0, max(0.0, phase_offset + phase_progress * 0.5))
-
 
 def _open_mft_stream(root_path: str):
     if os.name != "nt":
@@ -1361,7 +1319,16 @@ def _parse_mft_record(raw_record: bytes, fallback_record_id: int) -> _ParsedReco
                 name=link.name,
                 namespace=link.namespace,
                 file_attributes=link.file_attributes,
-                size_bytes=link.size_bytes if link.size_bytes > 0 else int(allocated_size if allocated_size is not None else (data_size or 0)),
+                allocated_size_bytes=int(
+                    allocated_size
+                    if allocated_size is not None
+                    else link.allocated_size_bytes
+                ),
+                logical_size_bytes=int(
+                    data_size
+                    if data_size is not None
+                    else link.logical_size_bytes
+                ),
                 modified_time=link.modified_time or modified_time,
             )
         )
@@ -1396,8 +1363,9 @@ def _parse_file_name_link(raw_record: bytes, offset: int, non_resident_flag: int
     try:
         parent_ref = struct.unpack_from("<Q", content, 0)[0] & REFERENCE_MASK
         modified_time = _filetime_to_iso(struct.unpack_from("<Q", content, 16)[0])
+        allocated_size_bytes = struct.unpack_from("<Q", content, 40)[0]
+        logical_size_bytes = struct.unpack_from("<Q", content, 48)[0]
         file_attributes = struct.unpack_from("<I", content, 56)[0]
-        size_bytes = struct.unpack_from("<Q", content, 40)[0]
         name_length = content[64]
         namespace = content[65]
         name_end = 66 + name_length * 2
@@ -1413,7 +1381,8 @@ def _parse_file_name_link(raw_record: bytes, offset: int, non_resident_flag: int
         name=name,
         namespace=namespace,
         file_attributes=int(file_attributes),
-        size_bytes=int(size_bytes),
+        allocated_size_bytes=int(allocated_size_bytes),
+        logical_size_bytes=int(logical_size_bytes),
         modified_time=modified_time,
     )
 

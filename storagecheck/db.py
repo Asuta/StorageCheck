@@ -52,6 +52,7 @@ class Database:
                     label TEXT NOT NULL,
                     root_path TEXT NOT NULL UNIQUE,
                     scan_mode TEXT NOT NULL,
+                    size_strategy TEXT NOT NULL DEFAULT 'allocated',
                     max_depth INTEGER NOT NULL DEFAULT 6,
                     schedule_type TEXT NOT NULL DEFAULT 'manual',
                     interval_hours INTEGER,
@@ -70,6 +71,7 @@ class Database:
                     root_path TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     max_depth INTEGER,
+                    size_strategy TEXT NOT NULL DEFAULT 'allocated',
                     engine TEXT NOT NULL DEFAULT 'recursive',
                     started_at TEXT NOT NULL,
                     finished_at TEXT,
@@ -102,6 +104,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_nodes_scan_path ON nodes(scan_id, path);
                 """
             )
+            self._ensure_column(connection, "targets", "size_strategy", "TEXT NOT NULL DEFAULT 'allocated'")
+            self._ensure_column(connection, "scans", "size_strategy", "TEXT NOT NULL DEFAULT 'allocated'")
             self._ensure_column(connection, "scans", "engine", "TEXT NOT NULL DEFAULT 'recursive'")
             self.recover_interrupted_scans(connection)
 
@@ -213,6 +217,7 @@ class Database:
                     label,
                     root_path,
                     scan_mode,
+                    size_strategy,
                     max_depth,
                     schedule_type,
                     interval_hours,
@@ -220,12 +225,13 @@ class Database:
                     enabled,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["label"],
                     payload["root_path"],
                     payload["scan_mode"],
+                    payload.get("size_strategy", "allocated"),
                     payload["max_depth"],
                     payload["schedule_type"],
                     payload.get("interval_hours"),
@@ -258,6 +264,7 @@ class Database:
                     label = ?,
                     root_path = ?,
                     scan_mode = ?,
+                    size_strategy = ?,
                     max_depth = ?,
                     schedule_type = ?,
                     interval_hours = ?,
@@ -270,6 +277,7 @@ class Database:
                     merged["label"],
                     merged["root_path"],
                     merged["scan_mode"],
+                    merged.get("size_strategy", "allocated"),
                     merged["max_depth"],
                     merged["schedule_type"],
                     merged.get("interval_hours"),
@@ -355,7 +363,15 @@ class Database:
             ),
         )
 
-    def create_scan_run(self, target_id: int, root_path: str, mode: str, max_depth: int | None, engine: str) -> int:
+    def create_scan_run(
+        self,
+        target_id: int,
+        root_path: str,
+        mode: str,
+        max_depth: int | None,
+        engine: str,
+        size_strategy: str = "allocated",
+    ) -> int:
         started_at = utc_now_iso()
         with self.connect() as connection:
             running_scan = connection.execute(
@@ -377,12 +393,13 @@ class Database:
                     root_path,
                     mode,
                     max_depth,
+                    size_strategy,
                     engine,
                     started_at,
                     status
-                ) VALUES (?, ?, ?, ?, ?, ?, 'running')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running')
                 """,
-                (target_id, root_path, mode, max_depth, engine, started_at),
+                (target_id, root_path, mode, max_depth, size_strategy, engine, started_at),
             )
             connection.execute(
                 """
@@ -394,13 +411,22 @@ class Database:
             )
             return int(cursor.lastrowid)
 
-    def insert_nodes(self, scan_id: int, nodes: list[dict[str, Any]]) -> None:
+    def insert_nodes(
+        self,
+        scan_id: int,
+        nodes: list[dict[str, Any]],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         if not nodes:
             return
-        with self.connect() as connection:
+        owns_connection = connection is None
+        if connection is None:
+            connection = self.connect()
+        try:
             connection.executemany(
                 """
-                INSERT OR REPLACE INTO nodes (
+                INSERT INTO nodes (
                     scan_id,
                     path,
                     parent_path,
@@ -435,6 +461,11 @@ class Database:
                     for node in nodes
                 ],
             )
+            if owns_connection:
+                connection.commit()
+        finally:
+            if owns_connection:
+                connection.close()
 
     def complete_scan_run(
         self,
@@ -444,9 +475,13 @@ class Database:
         total_size_bytes: int,
         stored_node_count: int,
         error_message: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         finished_at = utc_now_iso()
-        with self.connect() as connection:
+        owns_connection = connection is None
+        if connection is None:
+            connection = self.connect()
+        try:
             row = connection.execute(
                 "SELECT target_id FROM scans WHERE id = ?",
                 (scan_id,),
@@ -468,6 +503,11 @@ class Database:
                 (finished_at, status, total_size_bytes, stored_node_count, error_message, scan_id),
             )
             self._refresh_target_scan_summary(connection, target_id, updated_at=finished_at)
+            if owns_connection:
+                connection.commit()
+        finally:
+            if owns_connection:
+                connection.close()
 
     def list_scans(self, target_id: int, limit: int = 12) -> list[dict[str, Any]]:
         with self.connect() as connection:

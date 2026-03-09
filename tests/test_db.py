@@ -23,6 +23,7 @@ class DatabaseScanDeletionTests(unittest.TestCase):
                 "label": "System",
                 "root_path": root_path,
                 "scan_mode": "depth",
+                "size_strategy": "allocated",
                 "max_depth": 6,
                 "schedule_type": "manual",
                 "interval_hours": None,
@@ -145,6 +146,80 @@ class DatabaseScanDeletionTests(unittest.TestCase):
                     (scan_id,),
                 ).fetchone()["count"]
             self.assertEqual(node_count, 0)
+
+    def test_scan_run_keeps_size_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as root_dir:
+            database = Database(self.db_path)
+            database.initialize()
+            target = database.create_target(
+                {
+                    "label": "Fast",
+                    "root_path": root_dir,
+                    "scan_mode": "depth",
+                    "size_strategy": "logical",
+                    "max_depth": 6,
+                    "schedule_type": "manual",
+                    "interval_hours": None,
+                    "daily_time": None,
+                    "enabled": True,
+                }
+            )
+
+            scan_id = database.create_scan_run(
+                int(target["id"]),
+                root_dir,
+                "depth",
+                6,
+                "recursive",
+                size_strategy="logical",
+            )
+            scan = database.get_scan(scan_id)
+
+            self.assertIsNotNone(scan)
+            self.assertEqual(target["size_strategy"], "logical")
+            self.assertEqual(scan["size_strategy"], "logical")
+
+    def test_insert_nodes_can_reuse_one_connection_until_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as root_dir:
+            database = self._create_database(root_dir)
+            target_id = int(database.list_targets()[0]["id"])
+            scan_id = database.create_scan_run(target_id, root_dir, "depth", 6, "recursive")
+
+            writer = database.connect()
+            try:
+                writer.execute("BEGIN")
+                database.insert_nodes(
+                    scan_id,
+                    [
+                        {
+                            "path": root_dir,
+                            "parent_path": None,
+                            "name": "root",
+                            "depth": 0,
+                            "kind": "dir",
+                            "size_bytes": 64,
+                        }
+                    ],
+                    connection=writer,
+                )
+
+                with database.connect() as reader:
+                    pending_count = reader.execute(
+                        "SELECT COUNT(*) AS count FROM nodes WHERE scan_id = ?",
+                        (scan_id,),
+                    ).fetchone()["count"]
+                self.assertEqual(pending_count, 0)
+
+                writer.commit()
+
+                with database.connect() as reader:
+                    committed_count = reader.execute(
+                        "SELECT COUNT(*) AS count FROM nodes WHERE scan_id = ?",
+                        (scan_id,),
+                    ).fetchone()["count"]
+                self.assertEqual(committed_count, 1)
+            finally:
+                writer.close()
 
 
 if __name__ == "__main__":

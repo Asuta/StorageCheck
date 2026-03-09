@@ -31,10 +31,11 @@ class NtfsEngineSelectionTests(unittest.TestCase):
     @patch("storagecheck.ntfs_mft.is_user_admin", return_value=True)
     @patch("storagecheck.ntfs_mft.get_filesystem_name", return_value="NTFS")
     def test_selects_ntfs_mft_for_elevated_ntfs_root(self, *_args) -> None:
-        selection = select_scan_engine("C:\\", mode="depth", max_depth=6)
+        selection = select_scan_engine("C:\\", mode="depth", max_depth=6, size_strategy="logical")
 
         self.assertEqual(selection.engine, "ntfs_mft")
         self.assertIsInstance(selection.scanner, NtfsMftScanner)
+        self.assertEqual(selection.scanner.size_strategy, "logical")
         self.assertIsNone(selection.note)
 
     @patch("storagecheck.ntfs_mft.is_user_admin", return_value=False)
@@ -165,7 +166,8 @@ class NtfsEngineSelectionTests(unittest.TestCase):
         link = _parse_file_name_link(bytes(raw_record), 0, 0)
 
         self.assertIsNotNone(link)
-        self.assertEqual(link.size_bytes, 0)
+        self.assertEqual(link.allocated_size_bytes, 0)
+        self.assertEqual(link.logical_size_bytes, 987654321)
         self.assertEqual(link.file_attributes, 0x00400020)
 
     def test_parse_non_resident_data_sizes_reads_allocation_and_logical_size(self) -> None:
@@ -194,7 +196,8 @@ class NtfsEngineSelectionTests(unittest.TestCase):
             name="OneDrive.txt",
             namespace=1,
             file_attributes=0x00400020,
-            size_bytes=987654321,
+            allocated_size_bytes=987654321,
+            logical_size_bytes=1234,
             modified_time=None,
         )
 
@@ -202,6 +205,79 @@ class NtfsEngineSelectionTests(unittest.TestCase):
 
         self.assertEqual(size, 4096)
         mock_allocated_size.assert_called_once_with("C:\\OneDrive.txt", stat_result)
+
+    @patch("storagecheck.ntfs_mft._allocated_file_size", side_effect=AssertionError("logical strategy should not query allocated size"))
+    def test_logical_strategy_uses_link_logical_size(self, _mock_allocated_size) -> None:
+        scanner = NtfsMftScanner(mode="depth", max_depth=6, size_strategy="logical")
+        link = _FileLink(
+            parent_ref=5,
+            name="OneDrive.txt",
+            namespace=1,
+            file_attributes=0x00400020,
+            allocated_size_bytes=4096,
+            logical_size_bytes=1234,
+            modified_time=None,
+        )
+
+        size = scanner._resolved_link_size("C:\\OneDrive.txt", link)
+
+        self.assertEqual(size, 1234)
+
+    @patch.object(NtfsMftScanner, "_resolved_link_size", autospec=True, return_value=10)
+    @patch.object(NtfsMftScanner, "_iter_parsed_records", autospec=True)
+    def test_scan_merges_size_and_file_node_passes(self, mock_iter_records, mock_resolved_size) -> None:
+        root_record = MagicMock(record_id=5, is_directory=True, links=[], modified_time=None)
+        child_directory = MagicMock(
+            record_id=6,
+            is_directory=True,
+            links=[
+                _FileLink(
+                    parent_ref=5,
+                    name="Users",
+                    namespace=1,
+                    file_attributes=0,
+                    allocated_size_bytes=0,
+                    logical_size_bytes=0,
+                    modified_time=None,
+                )
+            ],
+            modified_time=None,
+        )
+        child_file = MagicMock(
+            record_id=7,
+            is_directory=False,
+            links=[
+                _FileLink(
+                    parent_ref=6,
+                    name="demo.txt",
+                    namespace=1,
+                    file_attributes=0,
+                    allocated_size_bytes=10,
+                    logical_size_bytes=10,
+                    modified_time=None,
+                )
+            ],
+            modified_time=None,
+        )
+        records = [root_record, child_directory, child_file]
+        mock_iter_records.side_effect = lambda _self, _root_path, should_cancel=None: iter(records)
+
+        scanner = NtfsMftScanner(mode="depth", max_depth=6, size_strategy="logical")
+        nodes: list[dict[str, object]] = []
+        progress_events: list[dict[str, object]] = []
+
+        result = scanner.scan("C:\\", on_node=nodes.append, on_progress=progress_events.append)
+
+        self.assertEqual(mock_iter_records.call_count, 2)
+        self.assertEqual(mock_resolved_size.call_count, 1)
+        self.assertEqual(result.total_size_bytes, 10)
+        self.assertEqual(result.stored_node_count, 3)
+        self.assertEqual({str(node["path"]) for node in nodes}, {"C:\\", "C:\\Users", "C:\\Users\\demo.txt"})
+        self.assertTrue(progress_events)
+        self.assertTrue(all(event.get("estimated_total_records") is None for event in progress_events))
+        self.assertTrue(any(event.get("phase") == "mft-pass-1" and event.get("progress_ratio") is None for event in progress_events))
+        self.assertEqual(progress_events[-1]["phase"], "done")
+        self.assertEqual(progress_events[-1]["progress_ratio"], 1.0)
 
 
 if __name__ == "__main__":

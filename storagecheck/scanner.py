@@ -42,9 +42,15 @@ class ScanResult:
 
 
 class DiskScanner:
-    def __init__(self, mode: str = "depth", max_depth: int = 6) -> None:
+    def __init__(
+        self,
+        mode: str = "depth",
+        max_depth: int = 6,
+        size_strategy: str = "allocated",
+    ) -> None:
         self.mode = mode
         self.max_depth = max_depth
+        self.size_strategy = size_strategy
         self.stored_node_count = 0
         self.skipped_entries = 0
         self.processed_entry_count = 0
@@ -255,6 +261,8 @@ class DiskScanner:
         return total_size, total_entries
 
     def _file_size_bytes(self, path: str, stat_result: os.stat_result) -> int:
+        if self.size_strategy == "logical":
+            return int(stat_result.st_size)
         return _allocated_file_size(path, stat_result)
 
     def _should_store(self, depth: int) -> bool:

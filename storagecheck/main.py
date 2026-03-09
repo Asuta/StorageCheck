@@ -32,6 +32,7 @@ class TargetPayload(BaseModel):
     label: str | None = Field(default=None, max_length=120)
     root_path: str
     scan_mode: Literal["depth", "full"] = "depth"
+    size_strategy: Literal["logical", "allocated"] = "logical"
     max_depth: int = Field(default=6, ge=1, le=20)
     schedule_type: Literal["manual", "hourly", "daily"] = "manual"
     interval_hours: int | None = Field(default=None, ge=1, le=168)
@@ -79,7 +80,7 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"app_title": "StorageCheck", "asset_version": __version__ + "-stale-delete-fix"},
+        context={"app_title": "StorageCheck", "asset_version": __version__ + "-fast-size-mode"},
     )
 
 
@@ -169,6 +170,7 @@ def list_target_scans(target_id: int, limit: int = 12) -> list[dict[str, object]
             continue
         scan["progress"] = active_scan
         scan["engine"] = active_scan.get("engine") or scan.get("engine") or "recursive"
+        scan["size_strategy"] = active_scan.get("size_strategy") or scan.get("size_strategy") or "allocated"
         scan["total_size_bytes"] = int(active_scan.get("scanned_size_bytes") or scan.get("total_size_bytes") or 0)
         scan["stored_node_count"] = int(active_scan.get("stored_node_count") or scan.get("stored_node_count") or 0)
         matched = True
@@ -183,6 +185,7 @@ def list_target_scans(target_id: int, limit: int = 12) -> list[dict[str, object]
                 "root_path": target["root_path"],
                 "mode": target["scan_mode"],
                 "max_depth": None if target["scan_mode"] == "full" else target["max_depth"],
+                "size_strategy": active_scan.get("size_strategy") or target.get("size_strategy") or "allocated",
                 "engine": active_scan.get("engine") or "recursive",
                 "started_at": active_scan.get("started_at"),
                 "finished_at": None,
@@ -251,6 +254,7 @@ def _normalized_target_payload(payload: TargetPayload) -> dict[str, object]:
         "label": label,
         "root_path": normalized_path,
         "scan_mode": payload.scan_mode,
+        "size_strategy": payload.size_strategy,
         "max_depth": payload.max_depth,
         "schedule_type": payload.schedule_type,
         "interval_hours": payload.interval_hours,

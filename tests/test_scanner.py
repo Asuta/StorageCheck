@@ -100,6 +100,19 @@ class ScannerDepthTests(unittest.TestCase):
             self.assertEqual(result.total_size_bytes, 4096)
             self.assertEqual(result.scanned_size_bytes, 4096)
 
+    @patch("storagecheck.scanner._allocated_file_size", side_effect=AssertionError("logical mode should not call allocated size"))
+    def test_logical_size_mode_uses_stat_size_for_totals(self, _mock_allocated_size) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            payload = root / "placeholder.bin"
+            payload.write_bytes(b"abc")
+
+            scanner = DiskScanner(mode="depth", max_depth=2, size_strategy="logical")
+            result = scanner.scan(str(root))
+
+            self.assertEqual(result.total_size_bytes, 3)
+            self.assertEqual(result.scanned_size_bytes, 3)
+
 
 class AllocatedFileSizeTests(unittest.TestCase):
     @patch("storagecheck.scanner.os.name", "nt")

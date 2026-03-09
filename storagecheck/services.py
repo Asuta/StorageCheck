@@ -18,6 +18,9 @@ class ScanNotRunningError(RuntimeError):
     pass
 
 
+SCAN_WRITE_BATCH_SIZE = 5000
+
+
 class ScanManager:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -61,6 +64,7 @@ class ScanManager:
                 "phase": None,
                 "phase_label": None,
                 "engine": None,
+                "size_strategy": None,
                 "engine_note": None,
                 "error_message": None,
                 "cancel_requested": False,
@@ -111,11 +115,13 @@ class ScanManager:
             return
 
         mode = target["scan_mode"]
+        size_strategy = str(target.get("size_strategy") or "allocated")
         max_depth = None if mode == "full" else int(target["max_depth"])
         engine_selection = select_scan_engine(
             str(target["root_path"]),
             mode=mode,
             max_depth=int(target["max_depth"]),
+            size_strategy=size_strategy,
         )
         self._merge_active_state(
             target_id,
@@ -123,6 +129,7 @@ class ScanManager:
             root_path=target["root_path"],
             mode=mode,
             max_depth=max_depth,
+            size_strategy=size_strategy,
             engine=engine_selection.engine,
             engine_note=engine_selection.note,
         )
@@ -133,6 +140,7 @@ class ScanManager:
                 mode=mode,
                 max_depth=max_depth,
                 engine=engine_selection.engine,
+                size_strategy=size_strategy,
             )
         except Exception as exc:
             self._merge_active_state(
@@ -149,10 +157,12 @@ class ScanManager:
             scan_id=scan_id,
             started_at=started_at,
             engine=engine_selection.engine,
+            size_strategy=size_strategy,
             engine_note=engine_selection.note,
         )
 
         buffer: list[dict[str, object]] = []
+        write_connection = self.db.connect()
 
         def should_cancel() -> bool:
             with self._lock:
@@ -166,12 +176,14 @@ class ScanManager:
             nonlocal buffer
             if not buffer:
                 return
-            self.db.insert_nodes(scan_id, buffer)
+            if not write_connection.in_transaction:
+                write_connection.execute("BEGIN")
+            self.db.insert_nodes(scan_id, buffer, connection=write_connection)
             buffer = []
 
         def on_node(node: dict[str, object]) -> None:
             buffer.append(node)
-            if len(buffer) >= 500:
+            if len(buffer) >= SCAN_WRITE_BATCH_SIZE:
                 flush()
 
         def on_progress(progress: dict[str, object]) -> None:
@@ -205,6 +217,7 @@ class ScanManager:
                 phase_label="????",
                 error_message=error_message,
                 engine=engine_selection.engine,
+                size_strategy=size_strategy,
                 engine_note=engine_selection.note,
             )
             self.db.complete_scan_run(
@@ -213,32 +226,38 @@ class ScanManager:
                 total_size_bytes=result.total_size_bytes,
                 stored_node_count=result.stored_node_count,
                 error_message=error_message,
+                connection=write_connection,
             )
+            write_connection.commit()
         except ScanCancelledError:
-            flush()
             canceled_message = "????????"
             current_state = self.get_active_state(target_id) or {}
+            if write_connection.in_transaction:
+                write_connection.rollback()
             self._merge_active_state(
                 target_id,
                 status="canceled",
                 error_message=canceled_message,
                 phase="canceled",
                 phase_label="???",
+                size_strategy=size_strategy,
             )
             self.db.complete_scan_run(
                 scan_id,
                 status="canceled",
                 total_size_bytes=int(current_state.get("scanned_size_bytes") or 0),
-                stored_node_count=int(current_state.get("stored_node_count") or 0),
+                stored_node_count=0,
                 error_message=canceled_message,
             )
         except Exception as exc:
-            flush()
+            if write_connection.in_transaction:
+                write_connection.rollback()
             self._merge_active_state(
                 target_id,
                 status="failed",
                 error_message=str(exc),
                 engine=engine_selection.engine,
+                size_strategy=size_strategy,
                 engine_note=engine_selection.note,
             )
             self.db.complete_scan_run(
@@ -248,3 +267,5 @@ class ScanManager:
                 stored_node_count=0,
                 error_message=str(exc),
             )
+        finally:
+            write_connection.close()
